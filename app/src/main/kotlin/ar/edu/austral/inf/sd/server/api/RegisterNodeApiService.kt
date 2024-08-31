@@ -10,9 +10,11 @@ interface RegisterNodeApiService {
      *
      * @param host  (optional)
      * @param port  (optional)
+     * @param uuid  (optional)
+     * @param salt  (optional)
      * @param name  (optional)
      * @return Todo bien (status code 200)
      * @see RegisterNodeApi#registerNode
      */
-    fun registerNode(host: kotlin.String?, port: kotlin.Int?, name: kotlin.String?): RegisterResponse
+    fun registerNode(host: kotlin.String?, port: kotlin.Int?, uuid: java.util.UUID?, salt: kotlin.String?, name: kotlin.String?): RegisterResponse
 }
