@@ -8,11 +8,18 @@ import ar.edu.austral.inf.sd.server.model.PlayResponse
 import ar.edu.austral.inf.sd.server.model.RegisterResponse
 import ar.edu.austral.inf.sd.server.model.Signature
 import ar.edu.austral.inf.sd.server.model.Signatures
+import org.springframework.http.HttpHeaders
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.http.HttpEntity
+import org.springframework.http.MediaType
 import org.springframework.stereotype.Component
+import org.springframework.util.LinkedMultiValueMap
+import org.springframework.util.MultiValueMap
+import org.springframework.web.client.RestTemplate
+import org.springframework.web.client.postForEntity
 import org.springframework.web.context.request.RequestContextHolder
 import org.springframework.web.context.request.ServletRequestAttributes
 import java.security.MessageDigest
@@ -36,6 +43,7 @@ class ApiServicesImpl: RegisterNodeApiService, RelayApiService, PlayApiService {
     private var resultReady = CountDownLatch(1)
     private var currentMessageWaiting = MutableStateFlow<PlayResponse?>(null)
     private var currentMessageResponse = MutableStateFlow<PlayResponse?>(null)
+    private val restTemplate = RestTemplate()
 
     override fun registerNode(host: String?, port: Int?, name: String?): RegisterResponse {
 
@@ -60,7 +68,7 @@ class ApiServicesImpl: RegisterNodeApiService, RelayApiService, PlayApiService {
         val receivedLength = message.length
         if (nextNode != null) {
             // Soy un relé. busco el siguiente y lo mando
-            // @ToDo do some work here
+            sendRelayMessage(message, receivedContentType, nextNode!!, signatures)
         } else {
             // me llego algo, no lo tengo que pasar
             if (currentMessageWaiting.value == null) throw BadRequestException("no waiting message")
@@ -98,18 +106,50 @@ class ApiServicesImpl: RegisterNodeApiService, RelayApiService, PlayApiService {
     }
 
     internal fun registerToServer(registerHost: String, registerPort: Int) {
-        // @ToDo acá tienen que trabajar ustedes
-        val registerNodeResponse: RegisterResponse = RegisterResponse("", -1, "", "")
-        println("nextNode = ${registerNodeResponse}")
+        val headers = HttpHeaders()
+        headers.contentType = MediaType.APPLICATION_JSON
+
+        val response = restTemplate.postForEntity<RegisterResponse>(
+            "http://$registerHost:$registerPort/register-node?host=$myServerName&port=$myServerPort&name=$myServerName",
+            headers
+        )
+
+        val registerNodeResponse: RegisterResponse = response.body ?: throw BadRequestException("No response from server")
+        println("nextNode = $registerNodeResponse")
+
         nextNode = with(registerNodeResponse) { RegisterResponse(nextHost, nextPort, uuid, hash) }
     }
 
     private fun sendRelayMessage(body: String, contentType: String, relayNode: RegisterResponse, signatures: Signatures) {
-        // @ToDo acá tienen que trabajar ustedes
+        val signature = clientSign(body, contentType)
+        val updatedSignatures = Signatures(signatures.items + signature)
+
+        // Create the message entity
+        val messageHeaders = HttpHeaders()
+        messageHeaders.contentType = MediaType.APPLICATION_JSON
+
+        val messageEntity = HttpEntity(body, messageHeaders)
+
+        // Create the multipart request
+        val multiPartBody: MultiValueMap<String, Any> = LinkedMultiValueMap()
+        multiPartBody.add("message", messageEntity)
+        multiPartBody.add("signatures", updatedSignatures)
+
+        // Create the request entity
+        val httpHeaders = HttpHeaders()
+        httpHeaders.contentType = MediaType.MULTIPART_FORM_DATA
+
+        val requestEntity = HttpEntity(multiPartBody, httpHeaders)
+
+        val url = "http://${relayNode.nextHost}:${relayNode.nextPort}/relay"
+
+        // Send the request
+        restTemplate.postForEntity(url, requestEntity, Signature::class.java)
     }
 
     private fun clientSign(message: String, contentType: String): Signature {
-        val receivedHash = doHash(message.encodeToByteArray(), salt)
+        val nodeHash = nextNode?.hash ?: salt
+        val receivedHash = doHash(message.encodeToByteArray(), nodeHash)
         return Signature(myServerName, receivedHash, contentType, message.length)
     }
 
