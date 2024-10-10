@@ -13,10 +13,11 @@ import jakarta.validation.constraints.Size
 import jakarta.validation.Valid
 
 /**
- * 
- * @param nextHost 
- * @param nextPort 
- * @param timeout 
+ *
+ * @param nextHost
+ * @param nextPort
+ * @param timeout
+ * @param xGameTimestamp
  */
 data class RegisterResponse(
 
@@ -25,8 +26,10 @@ data class RegisterResponse(
     @get:JsonProperty("nextPort", required = true) val nextPort: kotlin.Int,
 
     @get:Min(0)
-    @get:JsonProperty("timeout", required = true) val timeout: kotlin.Int
-    ) {
+    @get:JsonProperty("timeout", required = true) val timeout: kotlin.Int,
+
+    @get:Min(0)
+    @get:JsonProperty("xGameTimestamp", required = true) val xGameTimestamp: kotlin.Int
+) {
 
 }
-
