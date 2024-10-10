@@ -16,5 +16,5 @@ interface PlayApiService {
      *         or La red telefónica falló, no me contestaron. (status code 504)
      * @see PlayApi#sendMessage
      */
-    fun sendMessage(body: kotlin.String): PlayResponse
+    suspend fun sendMessage(body: kotlin.String): PlayResponse
 }

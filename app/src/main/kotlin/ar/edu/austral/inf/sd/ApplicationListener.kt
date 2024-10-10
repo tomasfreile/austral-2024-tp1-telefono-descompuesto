@@ -24,6 +24,4 @@ class ApplicationListener {
             apiServices.registerToServer(registerHost, registerPort)
         }
     }
-
-
 }

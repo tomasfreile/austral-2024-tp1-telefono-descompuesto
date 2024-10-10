@@ -34,7 +34,7 @@ class PlayApiController(@Autowired(required = true) val service: PlayApiService)
         value = ["/play"],
         produces = ["application/json"]
     )
-    fun sendMessage( @Valid @RequestBody body: kotlin.String): ResponseEntity<PlayResponse> {
+    suspend fun sendMessage(@Valid @RequestBody body: kotlin.String): ResponseEntity<PlayResponse> {
         return ResponseEntity(service.sendMessage(body), HttpStatus.valueOf(200))
     }
 }

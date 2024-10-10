@@ -10,20 +10,29 @@ import ar.edu.austral.inf.sd.server.model.PlayResponse
 import ar.edu.austral.inf.sd.server.model.RegisterResponse
 import ar.edu.austral.inf.sd.server.model.Signature
 import ar.edu.austral.inf.sd.server.model.Signatures
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withTimeout
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.http.*
 import org.springframework.stereotype.Component
+import org.springframework.util.LinkedMultiValueMap
+import org.springframework.web.client.RestTemplate
 import org.springframework.web.context.request.RequestContextHolder
 import org.springframework.web.context.request.ServletRequestAttributes
+import org.springframework.web.server.ResponseStatusException
 import java.security.MessageDigest
 import java.util.*
 import java.util.concurrent.CountDownLatch
 import kotlin.random.Random
 
 @Component
-class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService, UnregisterNodeApiService,
+class ApiServicesImpl @Autowired constructor(
+    private val restTemplate: RestTemplate
+): RegisterNodeApiService, RelayApiService, PlayApiService, UnregisterNodeApiService,
     ReconfigureApiService {
 
     @Value("\${server.name:nada}")
@@ -41,33 +50,48 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
     private var currentMessageWaiting = MutableStateFlow<PlayResponse?>(null)
     private var currentMessageResponse = MutableStateFlow<PlayResponse?>(null)
     private var xGameTimestamp: Int = 0
+    private var timeoutInSeconds: Int = 60
 
     override fun registerNode(host: String?, port: Int?, uuid: UUID?, salt: String?, name: String?): RegisterResponse {
+        // Si hay un dato vacio, devolver 400 (Bad Request)
+        if (host == null || port == null || uuid == null || salt == null || name == null) {
+            throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid request: missing required parameters")
+        }
+
+        // Si el UUID ya existe, pero la clave privada es distinta, devolver 401 (Unauthorized)
+        if (nodes.any { it.uuid == uuid && it.salt != salt }) {
+            throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "UUID already exists but the salt does not match")
+        }
 
         val nextNode = if (nodes.isEmpty()) {
             // es el primer nodo
-            val me = RegisterResponse(currentRequest.serverName, myServerPort, "", "")
+            val me = RegisterResponse(currentRequest.serverName, myServerPort, uuid, salt, timeoutInSeconds, xGameTimestamp)
             nodes.add(me)
             me
         } else {
             nodes.last()
         }
-        val node = RegisterResponse(host!!, port!!, uuid, salt)
+        val node = RegisterResponse(host, port, uuid, salt, timeoutInSeconds, xGameTimestamp)
         nodes.add(node)
+        xGameTimestamp++
 
-        return RegisterResponse(nextNode.nextHost, nextNode.nextPort, uuid, newSalt())
+        return RegisterResponse(nextNode.nextHost, nextNode.nextPort, nextNode.uuid, nextNode.salt, timeoutInSeconds, nextNode.xGameTimestamp)
     }
 
     override fun relayMessage(message: String, signatures: Signatures, xGameTimestamp: Int?): Signature {
+        // if timestamp is <= than the current one, return 400
+        if (xGameTimestamp != null && xGameTimestamp <= this.xGameTimestamp) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid timestamp")
+        }
+
         val receivedHash = doHash(message.encodeToByteArray(), salt)
         val receivedContentType = currentRequest.getPart("message")?.contentType ?: "nada"
         val receivedLength = message.length
         if (nextNode != null) {
-            // Soy un relé. busco el siguiente y lo mando
-            // @ToDo do some work here
+            sendRelayMessage(message, receivedContentType, nextNode!!, signatures)
         } else {
             // me llego algo, no lo tengo que pasar
-            if (currentMessageWaiting.value == null) throw BadRequestException("no waiting message")
+            if (currentMessageWaiting.value == null) throw ResponseStatusException(HttpStatus.BAD_REQUEST, "No message waiting")
             val current = currentMessageWaiting.getAndUpdate { null }!!
             val response = current.copy(
                 contentResult = if (receivedHash == current.originalHash) "Success" else "Failure",
@@ -87,19 +111,39 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         )
     }
 
-    override fun sendMessage(body: String): PlayResponse {
+    internal fun registerToServer(registerHost: String, registerPort: Int) {
+        // @ToDo acá tienen que trabajar ustedes
+        val registerNodeResponse: RegisterResponse = RegisterResponse(registerHost, registerPort, UUID.randomUUID(), "", timeoutInSeconds, 0)
+        println("nextNode = ${registerNodeResponse}")
+        nextNode = registerNodeResponse
+    }
+
+    // /play
+    override suspend fun sendMessage(body: String): PlayResponse {
         if (nodes.isEmpty()) {
-            // inicializamos el primer nodo como yo mismo
-            val me = RegisterResponse(currentRequest.serverName, myServerPort, "", "")
+            // Inicializamos el primer nodo como yo mismo
+            val me = RegisterResponse(currentRequest.serverName, myServerPort, UUID.randomUUID(), salt, timeoutInSeconds, xGameTimestamp)
             nodes.add(me)
         }
+
+        // Preparar el nuevo mensaje
         currentMessageWaiting.update { newResponse(body) }
-        val contentType = currentRequest.contentType
-        sendRelayMessage(body, contentType, nodes.last(), Signatures(listOf()))
-        resultReady.await()
+        val contentType = currentRequest.contentType ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Content type is missing")
+
         resultReady = CountDownLatch(1)
-        return currentMessageResponse.value!!
+
+        try {
+            withTimeout(timeoutInSeconds * 1000L) {
+                sendRelayMessage(body, contentType, nodes.last(), Signatures(listOf()))
+                resultReady.await()
+            }
+        } catch (e: TimeoutCancellationException) {
+            throw ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT, "La ronda del juego ha excedido el tiempo")
+        }
+
+        return currentMessageResponse.value ?: throw ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Error desconocido: no se generó la respuesta")
     }
+
 
     override fun unregisterNode(uuid: UUID?, salt: String?): String {
         TODO("Not yet implemented")
@@ -115,20 +159,44 @@ class ApiServicesImpl : RegisterNodeApiService, RelayApiService, PlayApiService,
         TODO("Not yet implemented")
     }
 
-    internal fun registerToServer(registerHost: String, registerPort: Int) {
-        // @ToDo acá tienen que trabajar ustedes
-        val registerNodeResponse: RegisterResponse = RegisterResponse("", -1, "", "")
-        println("nextNode = ${registerNodeResponse}")
-        nextNode = with(registerNodeResponse) { RegisterResponse(nextHost, nextPort, uuid, hash) }
-    }
 
+    // /relay
     private fun sendRelayMessage(
         body: String,
         contentType: String,
         relayNode: RegisterResponse,
-        signatures: Signatures
+        signatures: Signatures,
     ) {
-        // @ToDo acá tienen que trabajar ustedes
+        val newHash = doHash(body.encodeToByteArray(), salt)
+        val newSignatures = signatures.items + Signature(myServerName, newHash , contentType, body.length )
+
+        val nextUrl = "http://${relayNode.nextHost}:${relayNode.nextPort}/relay"
+
+        // Create headers
+        val headers = HttpHeaders()
+        headers.contentType = MediaType.MULTIPART_FORM_DATA
+        headers["X-Game-Timestamp"] = xGameTimestamp.toString()
+
+        // Create the multipart body
+        val bodyMap = LinkedMultiValueMap<String, Any>()
+        bodyMap.add("message", body)
+        bodyMap.add("signatures", newSignatures)
+
+        // Create the request entity
+        val requestEntity = HttpEntity(bodyMap, headers)
+
+        try {
+            val response: ResponseEntity<String> = restTemplate.exchange(
+                nextUrl,
+                HttpMethod.POST,
+                requestEntity,
+                String::class.java
+            )
+            println("Response: ${response.body}")
+        } catch (e: Exception) {
+            // 503
+            throw ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Error al enviar el mensaje")
+        }
     }
 
     private fun clientSign(message: String, contentType: String): Signature {
