@@ -25,10 +25,6 @@ data class RegisterResponse(
 
     @get:JsonProperty("nextPort", required = true) val nextPort: kotlin.Int,
 
-    @get:JsonProperty("uuid", required = true) val uuid: UUID,
-
-    @get:JsonProperty("salt", required = true) val salt: String,
-
     @get:Min(0)
     @get:JsonProperty("timeout", required = true) val timeout: kotlin.Int,
 

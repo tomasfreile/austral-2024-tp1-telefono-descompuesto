@@ -28,10 +28,15 @@ dependencies {
     // This dependency is used by the application.
     implementation(libs.guava)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor:1.7.3")
 
     annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springdoc:springdoc-openapi-ui:1.6.8")
+
+    implementation("org.reactivestreams:reactive-streams:1.0.3")
+    implementation("io.projectreactor:reactor-core:3.5.8")
+    implementation("org.springframework.boot:spring-boot-starter-webflux")
 
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.2")
 
