@@ -247,10 +247,6 @@ class ApiServicesImpl @Autowired constructor(
         nextPort: Int?,
         xGameTimestamp: Int?
     ): String {
-        // valido si los parametros son correctos
-        if (!(uuid == myUUID && salt == this.salt)) {
-            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid request: node not found")
-        }
         // actualizo el nodo siguiente
         this.nextNode = RegisterResponse(nextHost!!, nextPort!!, timeoutInSeconds, xGameTimestamp!!)
         return "Reconfigured node successfully"
