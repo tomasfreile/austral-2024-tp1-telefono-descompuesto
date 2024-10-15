@@ -55,13 +55,13 @@ class ApiServicesImpl @Autowired constructor(
     private var nextNode: RegisterResponse? = null
     private val messageDigest = MessageDigest.getInstance("SHA-512")
     private val salt = Base64.getEncoder().encodeToString(Random.nextBytes(9))
+    private var myUUID=UUID.randomUUID()
     private val currentRequest
         get() = (RequestContextHolder.getRequestAttributes() as ServletRequestAttributes).request
     private var resultReady = CountDownLatch(1)
     private var currentMessageWaiting = MutableStateFlow<PlayResponse?>(null)
     private var currentMessageResponse = MutableStateFlow<PlayResponse?>(null)
-    private var myXGameTimestamp = 0
-    private var currentTimestamp: Int = 0
+    private var xGameTimestamp = 0
 
     override fun registerNode(host: String?, port: Int?, uuid: UUID?, salt: String?, name: String?): ResponseEntity<RegisterResponse> {
         // Validar si los parámetros son nulos
@@ -80,36 +80,32 @@ class ApiServicesImpl @Autowired constructor(
             println("Node already registered: $host:$port")
             val nextNodeIndex = nodes.indexOf(existingNode) - 1
             val nextNode = nodes[nextNodeIndex]
-            return ResponseEntity(RegisterResponse(nextNode.host, nextNode.port, timeoutInSeconds, currentTimestamp), HttpStatus.ACCEPTED)
+            return ResponseEntity(RegisterResponse(nextNode.host, nextNode.port, timeoutInSeconds, xGameTimestamp), HttpStatus.ACCEPTED)
         }
 
+        xGameTimestamp += 1
 
         val nextNode = if (nodes.isEmpty()) {
             // es el primer nodo
-            val me = RegisterResponse(myServerHost, myServerPort, timeoutInSeconds, currentTimestamp)
+            val me = RegisterResponse(myServerHost, myServerPort, timeoutInSeconds, xGameTimestamp)
             val myNode = NodeInfo(name, host, port, uuid, salt)
             nodes.add(myNode)
             me
         } else {
             val lastNode = nodes.last()
-            RegisterResponse(lastNode.host, lastNode.port, timeoutInSeconds, currentTimestamp)
+            RegisterResponse(lastNode.host, lastNode.port, timeoutInSeconds, xGameTimestamp)
         }
         val node = NodeInfo(name, host, port, uuid, salt)
         nodes.add(node)
 
-        return ResponseEntity(RegisterResponse(nextNode.nextHost, nextNode.nextPort, timeoutInSeconds, currentTimestamp), HttpStatus.OK)
+
+        return ResponseEntity(RegisterResponse(nextNode.nextHost, nextNode.nextPort, timeoutInSeconds, xGameTimestamp), HttpStatus.OK)
     }
 
 
     // /relay
     override fun relayMessage(message: String, signatures: Signatures, xGameTimestamp: Int?): Signature {
         println("Relaying message: $message")
-
-        // if timestamp is <= than the current one, return 400
-        if (xGameTimestamp !== null && xGameTimestamp < myXGameTimestamp) {
-            println("Invalid timestamp: $xGameTimestamp")
-            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid timestamp")
-        }
 
         val receivedHash = doHash(message.encodeToByteArray(), salt)
         val receivedContentType = currentRequest.getPart("message")?.contentType ?: "nada"
@@ -118,7 +114,7 @@ class ApiServicesImpl @Autowired constructor(
 
         if (nextNode != null) {
             println("Sending relay message to: ${nextNode!!.nextHost}:${nextNode!!.nextPort}")
-            sendRelayMessage(message, receivedContentType, nextNode!!, signatures)
+            sendRelayMessage(message, receivedContentType, nextNode!!, signatures, xGameTimestamp!!)
         } else {
             // me llego algo, no lo tengo que pasar
             println("No next node, processing message locally.")
@@ -132,7 +128,6 @@ class ApiServicesImpl @Autowired constructor(
                 signatures = signatures
             )
             currentMessageResponse.update { response }
-            currentTimestamp += 1
             resultReady.countDown()
         }
         return Signature(
@@ -144,11 +139,18 @@ class ApiServicesImpl @Autowired constructor(
     }
 
     internal fun registerToServer(registerHost: String, registerPort: Int) {
-        val url = "http://$registerHost:$registerPort/register-node?host=localhost&port=$myServerPort&uuid=${UUID.randomUUID()}&salt=$salt&name=$myServerName"
+        val url = "http://$registerHost:$registerPort/register-node?host=$myServerHost&port=$myServerPort&uuid=$myUUID&salt=$salt&name=$myServerName"
         val response = restTemplate.postForEntity<RegisterResponse>(url)
-        myXGameTimestamp = response.body!!.xGameTimestamp
-        nextNode = with(response) { RegisterResponse(registerHost, registerPort, timeoutInSeconds, currentTimestamp) }
-        println("regisetred to server $registerHost:$registerPort")
+        val registeredNode = response.body!!
+        xGameTimestamp = registeredNode.xGameTimestamp
+        println("my xGameTimestamp is $xGameTimestamp")
+        nextNode = with(registeredNode) {
+            RegisterResponse(
+                nextHost, nextPort,
+                registeredNode.timeout, registeredNode.xGameTimestamp
+            )
+        }
+        println("registered to server $registerHost:$registerPort")
     }
 
     // /play
@@ -165,7 +167,7 @@ class ApiServicesImpl @Autowired constructor(
 
         // Send the message to the last node
         val relayNode = RegisterResponse(nodes.last().host, nodes.last().port, timeoutInSeconds, -1)
-        sendRelayMessage(body, contentType, relayNode, Signatures(listOf()))
+        sendRelayMessage(body, contentType, relayNode, Signatures(listOf()), xGameTimestamp)
 
         if(!resultReady.await(timeoutInSeconds.toLong(), TimeUnit.SECONDS)) {
             resultReady = CountDownLatch(1)
@@ -177,7 +179,31 @@ class ApiServicesImpl @Autowired constructor(
     }
 
     override fun unregisterNode(uuid: UUID?, salt: String?): String {
-        TODO("Not yet implemented")
+        //Cuando un participante decide abandonar el juego debe avisar al coordinador mediante un (POST a /unregister-node) indicando su identificador único y la clave que registró.
+        //El participante puede esperar un tiempo desde que aviso al coordinador para participar en jugadas que hayan comenzado antes de avisar.
+        //El coordinador va a devolver los siguientes status:
+        //202 si el unregister está aceptado
+        //400 si los datos no son válidos
+
+        val node = nodes.find { it.uuid == uuid && it.salt == salt }
+        if (node == null) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid request: node not found")
+        }
+
+//        // wait until the current play is finished
+//        if (currentMessageWaiting.value != null) {
+//            if(!resultReady.await(timeoutInSeconds.toLong(), TimeUnit.SECONDS)) {
+//                resultReady = CountDownLatch(1)
+//                println("Message relay timed out.")
+//                throw ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT, "Gateway Timeout")
+//            }
+//            resultReady = CountDownLatch(1)
+//        }
+//
+//        val nodeIndex = nodes.indexOf(node)
+
+
+        return "Unregistered"
     }
 
     override fun reconfigure(
@@ -196,7 +222,16 @@ class ApiServicesImpl @Autowired constructor(
         contentType: String,
         relayNode: RegisterResponse,
         signatures: Signatures,
+        timestamp: Int
     ) {
+
+        // if timestamp is <= than the current one, return 400
+        if (timestamp < this.xGameTimestamp) {
+            println("Invalid timestamp: $xGameTimestamp")
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid timestamp")
+        }
+
+
         val mySignature = clientSign(body, contentType)
         val newSignatures: Signatures = Signatures(signatures.items + mySignature)
 
@@ -207,7 +242,7 @@ class ApiServicesImpl @Autowired constructor(
         // Create headers
         val requestHeaders = HttpHeaders()
         requestHeaders.contentType = MediaType.MULTIPART_FORM_DATA
-        requestHeaders["X-Game-Timestamp"] = currentTimestamp.toString()
+        requestHeaders["X-Game-Timestamp"] = xGameTimestamp.toString()
 
         val messageHeaders = HttpHeaders().apply { setContentType(MediaType.parseMediaType(contentType)) }
         val messagePart = HttpEntity(body, messageHeaders)
@@ -231,7 +266,6 @@ class ApiServicesImpl @Autowired constructor(
             throw ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Error during relay to node: ${relayNode.nextHost}:${relayNode.nextPort}")
         }
 
-        myXGameTimestamp = currentTimestamp
     }
 
 
