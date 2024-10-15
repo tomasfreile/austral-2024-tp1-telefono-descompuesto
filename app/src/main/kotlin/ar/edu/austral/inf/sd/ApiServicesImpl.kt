@@ -91,7 +91,7 @@ class ApiServicesImpl @Autowired constructor(
             val me = RegisterResponse(myServerHost, myServerPort, timeoutInSeconds, xGameTimestamp)
             val myNode = NodeInfo(name, host, port, uuid, salt)
             nodes.add(myNode)
-            me
+            return ResponseEntity(me, HttpStatus.OK)
         } else {
             val lastNode = nodes.last()
             RegisterResponse(lastNode.host, lastNode.port, timeoutInSeconds, xGameTimestamp)
