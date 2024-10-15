@@ -27,6 +27,7 @@ import java.util.*
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
+import kotlin.system.exitProcess
 
 data class NodeInfo(
     val name: String,
@@ -140,17 +141,27 @@ class ApiServicesImpl @Autowired constructor(
 
     internal fun registerToServer(registerHost: String, registerPort: Int) {
         val url = "http://$registerHost:$registerPort/register-node?host=$myServerHost&port=$myServerPort&uuid=$myUUID&salt=$salt&name=$myServerName"
-        val response = restTemplate.postForEntity<RegisterResponse>(url)
-        val registeredNode = response.body!!
-        xGameTimestamp = registeredNode.xGameTimestamp
-        println("my xGameTimestamp is $xGameTimestamp")
-        nextNode = with(registeredNode) {
-            RegisterResponse(
-                nextHost, nextPort,
-                registeredNode.timeout, registeredNode.xGameTimestamp
-            )
+
+        try {
+            val response = restTemplate.postForEntity<RegisterResponse>(url)
+            val registeredNode = response.body!!
+            xGameTimestamp = registeredNode.xGameTimestamp
+            println("my xGameTimestamp is $xGameTimestamp")
+            println("my uuid is $myUUID")
+            println("my salt is $salt")
+            nextNode = with(registeredNode) {
+                RegisterResponse(
+                    nextHost, nextPort,
+                    registeredNode.timeout, registeredNode.xGameTimestamp
+                )
+            }
+            println("Registered to server $registerHost:$registerPort")
+        } catch (e: Exception) {
+            println("Error during registration: ${e.message}")
+            exitProcess(1)
         }
-        println("registered to server $registerHost:$registerPort")
+
+
     }
 
     // /play
@@ -179,31 +190,54 @@ class ApiServicesImpl @Autowired constructor(
     }
 
     override fun unregisterNode(uuid: UUID?, salt: String?): String {
-        //Cuando un participante decide abandonar el juego debe avisar al coordinador mediante un (POST a /unregister-node) indicando su identificador único y la clave que registró.
-        //El participante puede esperar un tiempo desde que aviso al coordinador para participar en jugadas que hayan comenzado antes de avisar.
-        //El coordinador va a devolver los siguientes status:
-        //202 si el unregister está aceptado
-        //400 si los datos no son válidos
+        println("Waiting for the play to finish")
+        if (currentMessageWaiting.value != null) {
+            if (!resultReady.await(timeoutInSeconds.toLong(), TimeUnit.SECONDS)) {
+                resultReady = CountDownLatch(1)
+                println("Message relay timed out.")
+                throw ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT, "Gateway Timeout")
+            }
+            resultReady = CountDownLatch(1)
+        }
 
+        println("The registered nodes are: $nodes")
         val node = nodes.find { it.uuid == uuid && it.salt == salt }
         if (node == null) {
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid request: node not found")
         }
 
-//        // wait until the current play is finished
-//        if (currentMessageWaiting.value != null) {
-//            if(!resultReady.await(timeoutInSeconds.toLong(), TimeUnit.SECONDS)) {
-//                resultReady = CountDownLatch(1)
-//                println("Message relay timed out.")
-//                throw ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT, "Gateway Timeout")
-//            }
-//            resultReady = CountDownLatch(1)
-//        }
-//
-//        val nodeIndex = nodes.indexOf(node)
+
+        val nodeIndex = nodes.indexOf(node)
+
+        if (nodeIndex == nodes.size - 1) {
+            // si el nodo es el ultimo, simplemente lo borro
+            nodes.removeAt(nodeIndex)
+        } else {
+            // si no es el ultimo, tengo que reconfigurar el nodo anterior
+            val previousNode = nodes[nodeIndex + 1]
+            val myNextNode = nodes[nodeIndex - 1]
+            val reconfigureUrl =
+                "http://${previousNode.host}:${previousNode.port}/reconfigure?uuid=${previousNode.uuid}&salt=${previousNode.salt}&nextHost=${myNextNode.host}&nextPort=${myNextNode.port}"
+
+            val httpHeaders = HttpHeaders().apply {
+                add("X-Game-Timestamp", xGameTimestamp.toString())
+            }
+
+            try {
+                println("Sending unregister message to: ${nextNode!!.nextHost}:${nextNode!!.nextPort}")
+                restTemplate.postForEntity<String>(reconfigureUrl, HttpEntity(null, httpHeaders))
+                nodes.removeAt(nodeIndex)
+            } catch (e: Exception) {
+                println("Error during unregister: ${e.message}")
+                throw ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "Error during unregister to node: ${previousNode.host}:${previousNode.port}"
+                )
+            }
+        }
+        return "Unregistered node successfully"
 
 
-        return "Unregistered"
     }
 
     override fun reconfigure(
@@ -213,7 +247,13 @@ class ApiServicesImpl @Autowired constructor(
         nextPort: Int?,
         xGameTimestamp: Int?
     ): String {
-        TODO("Not yet implemented")
+        // valido si los parametros son correctos
+        if (!(uuid == myUUID && salt == this.salt)) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid request: node not found")
+        }
+        // actualizo el nodo siguiente
+        this.nextNode = RegisterResponse(nextHost!!, nextPort!!, timeoutInSeconds, xGameTimestamp!!)
+        return "Reconfigured node successfully"
     }
 
 
